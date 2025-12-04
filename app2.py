@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import mysql.connector
 
 load_dotenv()
+
 app = Flask(__name__)
 
 logging.basicConfig(
@@ -35,36 +36,60 @@ def get_value(sql, params=None):
         row = cursor.fetchone()
         return row[0] if row and row[0] is not None else 0
     except Exception as e:
-        logging.error(f"Query Error: {str(e)} | SQL: {sql}")
+        logging.error(f"Query Error: {str(e)} SQL: {sql}")
         raise
     finally:
         if cursor: cursor.close()
         if conn: conn.close()
 
+
 def get_date_range(filter_type, start_date, end_date):
     today = datetime.now().date()
 
+    if not filter_type and not start_date:
+        return today, today
+
+    allowed = ["today", "yesterday", "last_week", "last_month"]
+
+    if filter_type and filter_type not in allowed:
+        raise ValueError("Invalid filter")
+
     if filter_type == "today":
         return today, today
+
     if filter_type == "yesterday":
         y = today - timedelta(days=1)
         return y, y
+
     if filter_type == "last_week":
         return today - timedelta(days=7), today
+
     if filter_type == "last_month":
         return today - timedelta(days=30), today
+
+    if start_date and not end_date:
+        raise ValueError("Start date provided but end date missing")
+
+    if end_date and not start_date:
+        raise ValueError("Start date required when using 'to'")
 
     if start_date and end_date:
         s = datetime.strptime(start_date, "%Y-%m-%d").date()
         e = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        if s > today:
+            raise ValueError("Start date cannot be in the future")
+
+        if e > today:
+            raise ValueError("End date cannot be in the future")
+
+        if s > e:
+            raise ValueError("Start date cannot be greater than end date")
+
         return s, e
 
-    if start_date and not end_date:
-        raise ValueError("End date (to) is required when 'from' is provided.")
-    if end_date and not start_date:
-        raise ValueError("Start date (from) is required when 'to' is provided.")
+    raise ValueError("Invalid date filter")
 
-    return today, today
 
 @app.route("/kpis", methods=["GET"])
 def kpis():
@@ -75,14 +100,8 @@ def kpis():
 
         try:
             start, end = get_date_range(filter_type, start_date, end_date)
-        except ValueError as e:
-            return jsonify({"status": "error", "message": str(e)}), 400
-
-        if start > end:
-            return jsonify({
-                "status": "error",
-                "message": "Start date cannot be greater than end date."
-            }), 400
+        except ValueError as ve:
+            return jsonify({"status": "error", "message": str(ve)}), 400
 
         files = get_value("""
             SELECT SUM(is_doc_processed='y')
@@ -103,28 +122,24 @@ def kpis():
             WHERE DATE(process_end_time) BETWEEN %s AND %s;
         """, (start, end))
 
-        if (files == 0) and (pages == 0) and (avg_seconds == 0):
+        if files == 0 and pages == 0 and (avg_seconds == 0 or avg_seconds is None):
             return jsonify({
                 "status": "error",
-                "message": "No records found for the selected date range.",
-                "data": {}
+                "message": "No data available for the selected date range"
             }), 404
 
-        if avg_seconds is None or avg_seconds == 0:
+        if not avg_seconds:
             avg_text = "0 seconds"
         else:
             avg_seconds = int(avg_seconds)
-            if avg_seconds < 60:
-                avg_text = f"{avg_seconds} seconds"
-            else:
-                avg_text = f"{avg_seconds // 60} mins"
+            avg_text = f"{avg_seconds} seconds" if avg_seconds < 60 else f"{avg_seconds // 60} mins"
 
         return jsonify({
             "status": "success",
             "message": "KPIs fetched successfully",
             "data": {
-                "files_processed": int(files or 0),
-                "texteract_pages": int(pages or 0),
+                "files_processed": int(files),
+                "texteract_pages": int(pages),
                 "avg_processing_time": avg_text,
                 "date_range": f"{start} to {end}"
             }
@@ -133,9 +148,10 @@ def kpis():
     except Exception as e:
         logging.error(f"Unhandled Error: {str(e)}")
         return jsonify({
-            "status": "error",
-            "message": "Something went wrong. Contact support."
+            "message": "Something went wrong. Contact support.",
+            "status": "error"
         }), 500
+
 
 if __name__ == "__main__":
     app.run(debug=True)
